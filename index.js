@@ -1,15 +1,34 @@
 require('dotenv').config();
 const WebSocket = require('ws');
 const { Connection, PublicKey } = require('@solana/web3.js');
+const TelegramBot = require('node-telegram-bot-api');
+
+class TelegramNotifier {
+    constructor(token, chatId) {
+        this.bot = new TelegramBot(token, { polling: false });
+        this.chatId = chatId;
+    }
+
+    async sendMessage(message) {
+        try {
+            await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
+        } catch (error) {
+            console.error('Failed to send Telegram message:', error);
+        }
+    }
+}
 
 class TransactionMonitor {
     constructor() {
         this.ws = new WebSocket(process.env.SOLANA_WEBHOOK_URL);
         this.connection = new Connection(process.env.SOLANA_RPC_URL);
-
+        this.telegram = new TelegramNotifier(
+            process.env.TELEGRAM_BOT_TOKEN,
+            process.env.TELEGRAM_CHAT_ID
+        );
         this.targetAmounts = [0.001, 1000].map(x => x * 1000000000);
-        // this.targetAmounts = [1.5, 2, 2.5, 3, 3.5, 4].map(x => x * 1000000000);
         this.subscriptions = {};  // lamports
+        this.processedTxs = new Set();  // To track processed transactions
     }
 
     subscribeToLogs(address) {
@@ -28,6 +47,7 @@ class TransactionMonitor {
         };
         this.ws.send(JSON.stringify(request));
     }
+
     startPing() {
         setInterval(() => {
             if (this.ws.readyState === WebSocket.OPEN) {
@@ -71,9 +91,32 @@ class TransactionMonitor {
         this.ws.on('close', () => console.log('WebSocket closed'));
     }
 
+    async notifyTransaction(txData) {
+        console.log('Target transaction detected:', txData);
+        
+        const message = `🔔 <b>New Transfer Detected</b>\n\n` +
+            `From: <code>${txData.from}</code>\n` +
+            `To: <code>${txData.to}</code>\n` +
+            `Amount: <b>${txData.amount} SOL</b>\n` +
+            `Signature: <a href="https://solscan.io/tx/${txData.signature}">View on Solscan</a>`;
+
+        await this.telegram.sendMessage(message);
+    }
+
     async handleAccountUpdate(message) {
         const logs = message.params.result.value;
         const signature = logs.signature;
+
+        // Check if we've already processed this transaction
+        if (this.processedTxs.has(signature)) {
+            return;
+        }
+        this.processedTxs.add(signature);
+
+        // Add a cleanup for old signatures every 1000 transactions
+        if (this.processedTxs.size > 1000) {
+            this.processedTxs.clear();
+        }
 
         console.log('Full params:', JSON.stringify(message.params, null, 2));
         console.log('Context:', JSON.stringify(message.params.result.context, null, 2));
@@ -95,80 +138,72 @@ class TransactionMonitor {
                 return;
             }
 
-             // Check if this is a nonce transaction
-        const isNonceTransaction = logs.logs.filter(log => 
-            log.includes('Program 11111111111111111111111111111111 invoke')
-        ).length > 1;
+            // Check if this is a nonce transaction
+            const isNonceTransaction = logs.logs.some(log => 
+                log.includes('Initialize nonce account') || 
+                log.includes('Advance nonce account')
+            );
 
-        // For nonce transactions, we need to check both SOL transfer instructions
-        if (isNonceTransaction) {
-            txInfo.transaction.message.instructions.forEach((instruction) => {
-                const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
-                
-                if (programId.toString() === '11111111111111111111111111111111') {
-                    const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
-
-                    console.log('Balance change:', balanceChange / 1000000000, 'SOL');
-                    console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
+            // For nonce transactions, we need to check both SOL transfer instructions
+            if (isNonceTransaction) {
+                txInfo.transaction.message.instructions.forEach((instruction) => {
+                    const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
                     
-                    if (this.isTargetAmount(balanceChange)) {
-                        console.log('Debug - instruction accounts:', instruction.accounts);
-                        console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
-                        const recipient = txInfo.transaction.message.accountKeys[3].toString();
+                    if (programId.toString() === '11111111111111111111111111111111') {
+                        const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
 
-                        console.log('Debug - recipient value:', recipient);
+                        console.log('Balance change:', balanceChange / 1000000000, 'SOL');
+                        console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
+                        
+                        if (this.isTargetAmount(balanceChange)) {
+                            console.log('Debug - instruction accounts:', instruction.accounts);
+                            console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
+                            const recipient = txInfo.transaction.message.accountKeys[3].toString();
 
-                        if (recipient) {
-                            console.log('Nonce Transfer detected:', {
-                                from: sender,
-                                to: recipient,
-                                amount: balanceChange / 1000000000,
-                                signature
-                            });
+                            if (recipient) {
+                                this.notifyTransaction({
+                                    from: sender,
+                                    to: recipient,
+                                    amount: balanceChange / 1000000000,
+                                    signature
+                                });
+                            }
                         }
                     }
-                }
-            });
-        } else {
-            // Handle regular transfer
-            const instruction = txInfo.transaction.message.instructions[0];
-            if (!instruction) return;
-
-            const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
-            if (programId.toString() !== '11111111111111111111111111111111') return;
-
-
-
-            const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
-
-            console.log('Balance change:', balanceChange / 1000000000, 'SOL');
-            console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
-            
-            if (this.isTargetAmount(balanceChange)) {
-                console.log('Debug - instruction accounts:', instruction.accounts);
-                console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
-                console.log('Debug - recipient value:', recipient);
-                const recipient = txInfo.transaction.message.accountKeys[1].toString();
-                
-                console.log('Regular Transfer detected:', {
-                    from: sender,
-                    to: recipient,
-                    amount: balanceChange / 1000000000,
-                    signature
                 });
+            } else {
+                // Handle regular transfer
+                const instruction = txInfo.transaction.message.instructions[0];
+                if (!instruction) return;
+
+                const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
+                if (programId.toString() !== '11111111111111111111111111111111') return;
+
+                const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
+
+                console.log('Balance change:', balanceChange / 1000000000, 'SOL');
+                console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
+                
+                if (this.isTargetAmount(balanceChange)) {
+                    console.log('Debug - instruction accounts:', instruction.accounts);
+                    console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
+                    
+                    const recipientIndex = instruction.accounts[1];
+                    const recipient = txInfo.transaction.message.accountKeys[recipientIndex].toString();                
+                    
+                    this.notifyTransaction({
+                        from: sender,
+                        to: recipient,
+                        amount: balanceChange / 1000000000,
+                        signature
+                    });
+                }
             }
+        } catch (error) {
+            console.error('Error processing transfer:', error);
+            await this.telegram.sendMessage(`❌ Error processing transfer: ${error.message}`);
         }
-    } catch (error) {
-        console.error('Error processing transfer:', error);
     }
-}
-
-
-    // isTargetAmount(lamports) {
-    //     return this.targetAmounts.some(target => 
-    //         Math.abs(lamports - target) <= this.tolerance
-    //     );g
-    // }
 
     isTargetAmount(lamports) {
         return lamports >= this.targetAmounts[0] && lamports <= this.targetAmounts[1];
@@ -184,10 +219,6 @@ class TransactionMonitor {
         } catch (error) {
             return false;
         }
-    }
-
-    notifyTransaction(txData) {
-        console.log('Target transaction detected:', txData);
     }
 }
 
