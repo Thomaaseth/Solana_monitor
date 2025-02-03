@@ -94,6 +94,15 @@ class TransactionMonitor {
             if (![process.env.WALLET_ADDRESS_1, process.env.WALLET_ADDRESS_2].includes(sender)) {
                 return;
             }
+
+            // Skip nonce transactions (multiple system program invocations)
+            const systemProgramInvocations = logs.logs.filter(log => 
+                log.includes('Program 11111111111111111111111111111111 invoke')
+            ).length;
+            
+            if (systemProgramInvocations > 1) {
+                return;
+            }
     
             // Get first instruction (transfer instruction)
             const instruction = txInfo.transaction.message.instructions[0];
@@ -108,13 +117,14 @@ class TransactionMonitor {
             
             // Check if amount is within target range
             if (this.isTargetAmount(balanceChange)) {
-                const recipient = txInfo.transaction.message.accountKeys[instruction.accounts[3]].toString();
+
+            const recipient = txInfo.transaction.message.accountKeys[1].toString();
                 
-                console.log('Outgoing transfer detected:', {
-                    from: sender,
+            console.log('Transfer detected:', {
+                from: sender,
                     to: recipient,
                     amount: balanceChange / 1000000000,
-                    signature
+                    signature,
                 });
             }
         } catch (error) {
@@ -126,7 +136,7 @@ class TransactionMonitor {
     // isTargetAmount(lamports) {
     //     return this.targetAmounts.some(target => 
     //         Math.abs(lamports - target) <= this.tolerance
-    //     );
+    //     );g
     // }
 
     isTargetAmount(lamports) {
