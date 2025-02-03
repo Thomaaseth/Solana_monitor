@@ -95,42 +95,73 @@ class TransactionMonitor {
                 return;
             }
 
-            // Skip nonce transactions (multiple system program invocations)
-            const systemProgramInvocations = logs.logs.filter(log => 
-                log.includes('Program 11111111111111111111111111111111 invoke')
-            ).length;
-            
-            if (systemProgramInvocations > 1) {
-                return;
-            }
-    
-            // Get first instruction (transfer instruction)
+             // Check if this is a nonce transaction
+        const isNonceTransaction = logs.logs.filter(log => 
+            log.includes('Program 11111111111111111111111111111111 invoke')
+        ).length > 1;
+
+        // For nonce transactions, we need to check both SOL transfer instructions
+        if (isNonceTransaction) {
+            txInfo.transaction.message.instructions.forEach((instruction) => {
+                const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
+                
+                if (programId.toString() === '11111111111111111111111111111111') {
+                    const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
+
+                    console.log('Balance change:', balanceChange / 1000000000, 'SOL');
+                    console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
+                    
+                    if (this.isTargetAmount(balanceChange)) {
+                        console.log('Debug - instruction accounts:', instruction.accounts);
+                        console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
+                        const recipient = txInfo.transaction.message.accountKeys[3].toString();
+
+                        console.log('Debug - recipient value:', recipient);
+
+                        if (recipient) {
+                            console.log('Nonce Transfer detected:', {
+                                from: sender,
+                                to: recipient,
+                                amount: balanceChange / 1000000000,
+                                signature
+                            });
+                        }
+                    }
+                }
+            });
+        } else {
+            // Handle regular transfer
             const instruction = txInfo.transaction.message.instructions[0];
             if (!instruction) return;
-    
-            // Verify it's a SOL transfer (system program)
+
             const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
             if (programId.toString() !== '11111111111111111111111111111111') return;
-    
-            // Get transfer amount
-            const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
-            
-            // Check if amount is within target range
-            if (this.isTargetAmount(balanceChange)) {
 
-            const recipient = txInfo.transaction.message.accountKeys[1].toString();
+
+
+            const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
+
+            console.log('Balance change:', balanceChange / 1000000000, 'SOL');
+            console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
+            
+            if (this.isTargetAmount(balanceChange)) {
+                console.log('Debug - instruction accounts:', instruction.accounts);
+                console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
+                console.log('Debug - recipient value:', recipient);
+                const recipient = txInfo.transaction.message.accountKeys[1].toString();
                 
-            console.log('Transfer detected:', {
-                from: sender,
+                console.log('Regular Transfer detected:', {
+                    from: sender,
                     to: recipient,
                     amount: balanceChange / 1000000000,
-                    signature,
+                    signature
                 });
             }
-        } catch (error) {
-            console.error('Error processing transfer:', error);
         }
+    } catch (error) {
+        console.error('Error processing transfer:', error);
     }
+}
 
 
     // isTargetAmount(lamports) {
