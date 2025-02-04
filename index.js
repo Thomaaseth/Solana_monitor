@@ -2,16 +2,85 @@ require('dotenv').config();
 const WebSocket = require('ws');
 const { Connection, PublicKey } = require('@solana/web3.js');
 const TelegramBot = require('node-telegram-bot-api');
+const fs = require('fs').promises;
+const path = require('path');
 
 class TelegramNotifier {
-    constructor(token, chatId) {
-        this.bot = new TelegramBot(token, { polling: false });
-        this.chatId = chatId;
+    constructor(token) {
+        // Enable polling mode
+        this.bot = new TelegramBot(token, { polling: true });
+        this.subscribers = new Set();
+        this.storageFile = path.join(__dirname, 'subscribers.json');
+        
+        // Load existing subscribers
+        this.loadSubscribers();
+
+
+        // Listen for /start commands
+        this.bot.onText(/\/start/, async (msg) => {
+            const chatId = msg.chat.id;
+            this.subscribers.add(chatId);
+            await this.saveSubscribers();
+            this.bot.sendMessage(chatId, "Welcome! You'll now receive notifications for SOL transfers.");
+            console.log('New subscriber:', chatId);
+        });
+
+        // Listen for /stop commands
+        this.bot.onText(/\/stop/, async (msg) => {
+            const chatId = msg.chat.id;
+            this.subscribers.delete(chatId);
+            await this.saveSubscribers();
+            this.bot.sendMessage(chatId, "You've been unsubscribed from notifications.");
+            console.log('Subscriber left:', chatId);
+        });
     }
+
+    async loadSubscribers() {
+        try {
+            const data = await fs.readFile(this.storageFile, 'utf8');
+            const subscriberArray = JSON.parse(data);
+            this.subscribers = new Set(subscriberArray);
+            console.log('Loaded subscribers:', this.subscribers.size);
+        } catch (error) {
+            if (error.code === 'ENOENT') {
+                // File doesn't exist yet, start with empty set
+                console.log('No existing subscribers file, starting fresh');
+                this.subscribers = new Set();
+            } else {
+                console.error('Error loading subscribers:', error);
+            }
+        }
+    }
+
+    async saveSubscribers() {
+        try {
+            const subscriberArray = Array.from(this.subscribers);
+            await fs.writeFile(this.storageFile, JSON.stringify(subscriberArray));
+            console.log('Saved subscribers:', this.subscribers.size);
+        } catch (error) {
+            console.error('Error saving subscribers:', error);
+        }
+    }
+
 
     async sendMessage(message) {
         try {
-            await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
+            // Send to all subscribers
+            const sendPromises = Array.from(this.subscribers).map(chatId =>
+                this.bot.sendMessage(chatId, message, { parse_mode: 'HTML' })
+                    .catch(error => {
+                        if (error.response?.statusCode === 403) {
+                            // User has blocked the bot, remove them from subscribers
+                            console.log('Removing blocked user:', chatId);
+                            this.subscribers.delete(chatId);
+                            this.saveSubscribers();
+                        } else {
+                            console.error(`Error sending to ${chatId}:`, error);
+                        }
+                    })
+            );
+
+            await Promise.all(sendPromises);
         } catch (error) {
             console.error('Failed to send Telegram message:', error);
         }
@@ -22,13 +91,11 @@ class TransactionMonitor {
     constructor() {
         this.ws = new WebSocket(process.env.SOLANA_WEBHOOK_URL);
         this.connection = new Connection(process.env.SOLANA_RPC_URL);
-        this.telegram = new TelegramNotifier(
-            process.env.TELEGRAM_BOT_TOKEN,
-            process.env.TELEGRAM_CHAT_ID
-        );
-        this.targetAmounts = [0.001, 1000].map(x => x * 1000000000);
-        this.subscriptions = {};  // lamports
-        this.processedTxs = new Set();  // To track processed transactions
+        this.telegram = new TelegramNotifier(process.env.TELEGRAM_BOT_TOKEN);
+        this.targetAmounts = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5].map(x => x * 1000000000);
+        this.subscriptions = {};
+        this.processedTxs = new Set();
+        this.tolerance = 0.002 * 1000000000; // 0.002 SOL tolerance
     }
 
     subscribeToLogs(address) {
@@ -95,8 +162,8 @@ class TransactionMonitor {
         console.log('Target transaction detected:', txData);
         
         const message = `🔔 <b>New Transfer Detected</b>\n\n` +
-            `From: <code>${txData.from}</code>\n` +
             `To: <code>${txData.to}</code>\n` +
+            `From: <code>${txData.from}</code>\n` +
             `Amount: <b>${txData.amount} SOL</b>\n` +
             `Signature: <a href="https://solscan.io/tx/${txData.signature}">View on Solscan</a>`;
 
@@ -123,6 +190,11 @@ class TransactionMonitor {
                 commitment: 'confirmed',
                 maxSupportedTransactionVersion: 0
             });
+
+            if (!txInfo?.transaction?.message?.instructions) {
+                console.log('No valid transaction instructions found');
+                return;
+            }
     
             if (!txInfo || !txInfo.meta) return;
 
@@ -160,7 +232,7 @@ class TransactionMonitor {
             console.log('No valid transfer instructions found');
             return;
             }
-            
+
             const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
     
             console.log('Balance change:', balanceChange / 1000000000, 'SOL');
@@ -174,16 +246,16 @@ class TransactionMonitor {
                 const recipientIndex = transferInstruction.accounts[1];
                 const recipient = txInfo.transaction.message.accountKeys[recipientIndex].toString();
     
-                console.log('Transfer detected:', {
-                    from: sender,
-                    to: recipient,
-                    amount: balanceChange / 1000000000,
-                    signature
-                });
+                // console.log('Transfer detected:', {
+                //     from: sender,
+                //     to: recipient,
+                //     amount: balanceChange / 1000000000,
+                //     signature
+                // });
     
                 await this.notifyTransaction({
-                    from: sender,
                     to: recipient,
+                    from: sender,
                     amount: balanceChange / 1000000000,
                     signature
                 });
@@ -194,140 +266,12 @@ class TransactionMonitor {
         }
     }
 
-    // async handleAccountUpdate(message) {
-    //     const logs = message.params.result.value;
-    //     const signature = logs.signature;
 
-    //     // Check if we've already processed this transaction
-    //     if (this.processedTxs.has(signature)) {
-    //         return;
-    //     }
-    //     this.processedTxs.add(signature);
-
-    //     // Add a cleanup for old signatures every 1000 transactions
-    //     if (this.processedTxs.size > 1000) {
-    //         this.processedTxs.clear();
-    //     }
-
-    //     console.log('Full params:', JSON.stringify(message.params, null, 2));
-    //     // console.log('Context:', JSON.stringify(message.params.result.context, null, 2));
-    //     // console.log('Value:', JSON.stringify(message.params.result.value, null, 2));
-        
-    //     try {
-    //         const txInfo = await this.connection.getTransaction(signature, {
-    //             commitment: 'confirmed',
-    //             maxSupportedTransactionVersion: 0
-    //         });
-    
-    //         if (!txInfo || !txInfo.meta) return;
-    
-    //         // Get transaction sender
-    //         const sender = txInfo.transaction.message.accountKeys[0].toString();
-            
-    //         // Check if sender is one of our monitored wallets
-    //         if (![process.env.WALLET_ADDRESS_1, process.env.WALLET_ADDRESS_2].includes(sender)) {
-    //             return;
-    //         }
-
-    //         function checkIfNonceTransaction(txInfo, logs) {
-    //             // Check 1: Multiple system program invocations
-    //             const multipleSystemInvokes = logs.logs.filter(log => 
-    //                 log.includes('Program 11111111111111111111111111111111 invoke')
-    //             ).length > 1;
-            
-    //             // Check 2: Nonce advance instruction
-    //             const hasNonceInstruction = txInfo.transaction.message.instructions.some(instruction => {
-    //                 const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
-    //                 return programId.toString() === '11111111111111111111111111111111' && 
-    //                        instruction.data.startsWith('3d');
-    //             });
-            
-    //             // Check 3: Standard nonce account structure (sender, nonce account, authority, recipient)
-    //             const hasNonceStructure = txInfo.transaction.message.accountKeys.length >= 4 && 
-    //                 txInfo.transaction.message.accountKeys[1] && // nonce account
-    //                 txInfo.transaction.message.accountKeys[2] && // authority
-    //                 txInfo.transaction.message.accountKeys[3];   // recipient
-            
-    //             // Return true if at least two checks pass
-    //             const checks = [multipleSystemInvokes, hasNonceInstruction, hasNonceStructure];
-    //             const passedChecks = checks.filter(Boolean).length;
-                
-    //             console.log('Nonce Transaction Checks:', {
-    //                 multipleSystemInvokes,
-    //                 hasNonceInstruction,
-    //                 hasNonceStructure,
-    //                 passedChecks
-    //             });
-            
-    //             return passedChecks >= 2;
-    //         }
-            
-    //         // Determine if this is a nonce transaction
-    //         const isNonceTransaction = checkIfNonceTransaction(txInfo, logs);
-
-    //         // For nonce transactions, we need to check both SOL transfer instructions
-    //         if (isNonceTransaction) {
-    //             txInfo.transaction.message.instructions.forEach((instruction) => {
-    //                 const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
-                    
-    //                 if (programId.toString() === '11111111111111111111111111111111') {
-    //                     const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
-
-    //                     console.log('Balance change:', balanceChange / 1000000000, 'SOL');
-    //                     console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
-                        
-    //                     if (this.isTargetAmount(balanceChange)) {
-    //                         console.log('Debug - instruction accounts:', instruction.accounts);
-    //                         console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
-    //                         const recipient = txInfo.transaction.message.accountKeys[3].toString();
-
-    //                         if (recipient) {
-    //                             this.notifyTransaction({
-    //                                 from: sender,
-    //                                 to: recipient,
-    //                                 amount: balanceChange / 1000000000,
-    //                                 signature
-    //                             });
-    //                         }
-    //                     }
-    //                 }
-    //             });
-    //         } else {
-    //             // Handle regular transfer
-    //             const instruction = txInfo.transaction.message.instructions[0];
-    //             if (!instruction) return;
-
-    //             const programId = txInfo.transaction.message.accountKeys[instruction.programIdIndex];
-    //             if (programId.toString() !== '11111111111111111111111111111111') return;
-
-    //             const balanceChange = txInfo.meta.preBalances[0] - txInfo.meta.postBalances[0];
-
-    //             console.log('Balance change:', balanceChange / 1000000000, 'SOL');
-    //             console.log('Target range:', this.targetAmounts.map(x => x / 1000000000), 'SOL');
-                
-    //             if (this.isTargetAmount(balanceChange)) {
-    //                 console.log('Debug - instruction accounts:', instruction.accounts);
-    //                 console.log('Debug - all account keys:', txInfo.transaction.message.accountKeys.map(key => key.toString()));
-                    
-    //                 const recipientIndex = instruction.accounts[1];
-    //                 const recipient = txInfo.transaction.message.accountKeys[recipientIndex].toString();                
-                    
-    //                 this.notifyTransaction({
-    //                     from: sender,
-    //                     to: recipient,
-    //                     amount: balanceChange / 1000000000,
-    //                     signature
-    //                 });
-    //             }
-    //         }
-    //     } catch (error) {
-    //         console.error('Error processing transfer:', error);
-    //         await this.telegram.sendMessage(`❌ Error processing transfer: ${error.message}`);
-    //     }
-    // }
-
+    // isTargetAmount method
     isTargetAmount(lamports) {
-        return lamports >= this.targetAmounts[0] && lamports <= this.targetAmounts[1];
+        return this.targetAmounts.some(target => 
+            Math.abs(lamports - target) <= this.tolerance
+        );
     }
 
     async isNewWallet(address) {
