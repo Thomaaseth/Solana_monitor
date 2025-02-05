@@ -17,11 +17,38 @@ class TelegramNotifier {
 
         // Set up command handlers
         this.setupCommandHandlers();
+        this.setupCommands();
 
         // Add periodic health checks
         setInterval(() => {
             this.performHealthCheck();
         }, 30 * 60 * 1000); // Check every 30 minutes
+    }
+
+    async setupCommands() {
+        try {
+            await this.bot.setMyCommands([
+                {
+                    command: 'start',
+                    description: 'Subscribe to transfer notifications'
+                },
+                {
+                    command: 'stop',
+                    description: 'Unsubscribe from notifications'
+                },
+                {
+                    command: 'status',
+                    description: 'Check bot status and uptime'
+                },
+                {
+                    command: 'health',
+                    description: 'Check connection health'
+                }
+            ]);
+            console.log('Bot commands menu set up successfully');
+        } catch (error) {
+            console.error('Failed to set up bot commands:', error);
+        }
     }
 
     setupCommandHandlers() {
