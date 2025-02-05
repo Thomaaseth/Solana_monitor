@@ -229,10 +229,6 @@ class TransactionMonitor {
         this.ws.on('error', (error) => {
             console.error('WebSocket error:', error);
         });
-
-        this.ws.on('pong', () => {
-            console.log('Received pong from server');
-        });
     }
 
 
@@ -279,19 +275,29 @@ class TransactionMonitor {
 
         this.pingInterval = setInterval(() => {
             if (this.ws.readyState === WebSocket.OPEN) {
+                let pongReceived = false;
+                
                 this.ws.ping();
                 console.log('Ping sent');
                 
-                // Set a timeout to check if we received a pong
-                setTimeout(() => {
-                    if (this.ws.readyState === WebSocket.OPEN) {
-                        // If we're still connected but didn't get a pong, reconnect
+                // Store the timeout reference so we can clear it
+                const pongTimeout = setTimeout(() => {
+                    if (!pongReceived && this.ws.readyState === WebSocket.OPEN) {
                         console.log('No pong received, reconnecting...');
                         this.ws.terminate();
                     }
                 }, 5000); // Wait 5 seconds for pong
+
+                // One-time pong listener for this specific ping
+                const pongHandler = () => {
+                    pongReceived = true;
+                    clearTimeout(pongTimeout);
+                    console.log('Received pong from server');
+                };
+
+                this.ws.once('pong', pongHandler);
             }
-        }, 15000); // Reduced ping interval to 15 seconds
+        }, 15000); // Ping interval of 15 seconds
     }
 
     async start() {
