@@ -50,11 +50,18 @@ class TelegramNotifier {
             console.error('Failed to set up bot commands:', error);
         }
     }
+    
 
     setupCommandHandlers() {
         // Status command
         this.bot.onText(/\/status/, async (msg) => {
             const chatId = msg.chat.id;
+
+            if (!this.monitor) {
+                await this.bot.sendMessage(chatId, `❌ Bot is currently offline\n\nLast seen: ${new Date().toISOString()}`);
+                return;
+            }
+
             const uptime = process.uptime();
             const days = Math.floor(uptime / 86400);
             const hours = Math.floor((uptime % 86400) / 3600);
@@ -72,6 +79,12 @@ class TelegramNotifier {
         // Add healthcheck command
         this.bot.onText(/\/health/, async (msg) => {
             const chatId = msg.chat.id;
+
+            if (!this.monitor) {
+                await this.bot.sendMessage(chatId, `❌ Bot is currently offline\n\nSystem is not monitoring transactions. Please check with the administrator.`);
+                return;
+            }
+
             try {
                 // Test WebSocket connection
                 const wsStatus = this.monitor.ws.readyState === WebSocket.OPEN ? '✅' : '❌';
@@ -99,6 +112,13 @@ class TelegramNotifier {
         // Listen for /start commands
         this.bot.onText(/\/start/, async (msg) => {
             const chatId = msg.chat.id;
+
+            if (!this.monitor) {
+                await this.bot.sendMessage(chatId, 
+                    "⚠️ Note: Bot is currently offline.\n" +
+                    "You'll receive notifications when the system is back online.");
+            }
+
             this.subscribers.add(chatId);
             await this.saveSubscribers();
             this.bot.sendMessage(chatId, "Welcome! You'll now receive notifications for SOL transfers.");
@@ -110,7 +130,12 @@ class TelegramNotifier {
             const chatId = msg.chat.id;
             this.subscribers.delete(chatId);
             await this.saveSubscribers();
-            this.bot.sendMessage(chatId, "You've been unsubscribed from notifications.");
+
+            const message = !this.monitor 
+                ? "You've been unsubscribed from notifications.\n\nNote: Bot is currently offline but your unsubscribe request has been processed."
+                : "You've been unsubscribed from notifications.";
+
+            this.bot.sendMessage(chatId, message);
             console.log('Subscriber left:', chatId);
         });
     }
@@ -340,6 +365,7 @@ class TransactionMonitor {
             `To: <code>${txData.to}</code>\n` +
             `From: <code>${txData.from}</code>\n` +
             `Amount: <b>${txData.amount} SOL</b>\n` +
+            `Fresh Wallet: ${txData.isFresh ? '✅' : '❌'}\n` +
             `Signature: <a href="https://solscan.io/tx/${txData.signature}">View on Solscan</a>`;
 
         await this.telegram.sendMessage(message);
@@ -420,19 +446,17 @@ class TransactionMonitor {
                 // For transfer instruction, the destination is always the second account
                 const recipientIndex = transferInstruction.accounts[1];
                 const recipient = txInfo.transaction.message.accountKeys[recipientIndex].toString();
-    
-                // console.log('Transfer detected:', {
-                //     from: sender,
-                //     to: recipient,
-                //     amount: balanceChange / 1000000000,
-                //     signature
-                // });
+
+                // Check fresh wallet
+                const isFresh = await this.isNewWallet(recipient);
+                console.log('Is fresh wallet:', isFresh);
     
                 await this.notifyTransaction({
                     to: recipient,
                     from: sender,
                     amount: balanceChange / 1000000000,
-                    signature
+                    signature,
+                    isFresh
                 });
             }
         } catch (error) {
